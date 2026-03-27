@@ -209,22 +209,22 @@ async function searchBMD(url, env) {
         'Accept':       'text/html,*/*',
       },
       body:     formData.toString(),
-      redirect: 'manual', // capture the redirect URL to extract search_id
+      redirect: 'follow', // Workers don't expose Location on manual redirects
     });
 
-    // FreeBMD2 redirects to /search_queries/<search_id> on success
-    const location = postResp.headers.get('location') || '';
-    const idMatch  = location.match(/search_queries\/([a-f0-9]+)/);
+    // After following the redirect, the final URL contains the search_id
+    // e.g. https://www.freebmd2.org.uk/search_queries/69c6f08bb620e0d77cea63b6
+    const finalUrl = postResp.url || '';
+    const idFromUrl = finalUrl.match(/search_queries\/([a-f0-9]{20,})/);
 
-    if (!idMatch) {
-      // No redirect — possibly a validation error or rate limit
-      // Fall back to reading the response body for clues
-      const body = await postResp.text();
-      const inlineId = body.match(/search_queries\/([a-f0-9]{20,})/);
-      if (!inlineId) throw new Error('FreeBMD2 did not return a search ID');
-      searchId = inlineId[1];
+    if (idFromUrl) {
+      searchId = idFromUrl[1];
     } else {
-      searchId = idMatch[1];
+      // Fall back to scanning the response body
+      const body = await postResp.text();
+      const idFromBody = body.match(/search_queries\/([a-f0-9]{20,})/);
+      if (!idFromBody) throw new Error('FreeBMD2 did not return a search ID');
+      searchId = idFromBody[1];
     }
 
     resultsUrl = `https://www.freebmd2.org.uk/search_queries/${searchId}?results_per_page=100`;
