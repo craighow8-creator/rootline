@@ -1432,16 +1432,17 @@ async function doSearch() {
     searches.push(
       apiFetch(`/api/search/bmd?${params}`)
         .then(d => {
-          if (d?.results) {
-            // Worker returns a flat array; split by record_type
-            const all = Array.isArray(d.results) ? d.results : [];
-            state.searchResults.births    = all.filter(r => /Birth/i.test(r.record_type));
-            state.searchResults.marriages = all.filter(r => /Marriage/i.test(r.record_type));
-            state.searchResults.deaths    = all.filter(r => /Death/i.test(r.record_type));
+          if (d) {
+            state.searchResults.births    = d.results?.births    || [];
+            state.searchResults.marriages = d.results?.marriages || [];
+            state.searchResults.deaths    = d.results?.deaths    || [];
+
+            if (!d.data_imported) {
+              document.getElementById('importBanner').style.display = 'block';
+            }
           }
-          if (d?.error) console.warn('BMD search error:', d.error);
         })
-        .catch(e => console.warn('BMD fetch failed:', e))
+        .catch(() => {})
     );
   }
 
@@ -1549,39 +1550,31 @@ function cwgcCard(r) {
 function bmdCard(r, type) {
   const typeLabels = { birth: '🌱 Birth', marriage: '💍 Marriage', death: '✦ Death' };
   const badgeClass = { birth: 'badge-birth', marriage: 'badge-marriage', death: 'badge-death' };
-  // quarter is now a string like "Q3 (Jul–Sep)" from FreeBMD2 worker, or null for post-1984 records
-  const quarterStr  = r.quarter || '';
-  const name        = `${r.forename || ''} ${r.surname}`.trim();
-  const districtStr = r.district || '—';
-  const subLine     = `${districtStr} · ${r.year || '—'}${quarterStr ? ' · ' + quarterStr : ''}`;
+  const quarters   = ['', 'Jan–Mar', 'Apr–Jun', 'Jul–Sep', 'Oct–Dec'];
+  const name       = `${r.forename || ''} ${r.surname}`.trim();
 
   return `
     <div class="result-card" data-type="${type}">
       <div class="result-card-head">
         <span class="result-source-badge ${badgeClass[type]}">${typeLabels[type]}</span>
         <div>
-          <div class="result-name">${name}${r.redacted ? ' <span title="Recent record — some fields hidden" style="opacity:0.5;font-size:0.75em">🔒</span>' : ''}</div>
-          <div class="result-sub">${subLine}</div>
+          <div class="result-name">${name}</div>
+          <div class="result-sub">${r.district}, ${r.county} · ${r.year} ${quarters[r.quarter] || ''}</div>
         </div>
       </div>
       <div class="result-body">
         <div class="result-field">
           <span class="field-label">Year</span>
-          <span class="field-value">${r.year || '—'}</span>
+          <span class="field-value">${r.year}</span>
         </div>
         <div class="result-field">
           <span class="field-label">District</span>
-          <span class="field-value">${districtStr}</span>
+          <span class="field-value">${r.district || '—'}</span>
         </div>
-        ${r.age_at_death ? `
+        ${r.age ? `
         <div class="result-field">
-          <span class="field-label">Age at death</span>
-          <span class="field-value">${r.age_at_death}</span>
-        </div>` : ''}
-        ${r.mothers_maiden ? `
-        <div class="result-field">
-          <span class="field-label">Mother's maiden name</span>
-          <span class="field-value">${r.mothers_maiden}</span>
+          <span class="field-label">Age</span>
+          <span class="field-value">${r.age}</span>
         </div>` : ''}
         ${r.spouse_surname ? `
         <div class="result-field">
@@ -1590,15 +1583,13 @@ function bmdCard(r, type) {
         </div>` : ''}
         <div class="result-field">
           <span class="field-label">GRO Ref</span>
-          <span class="field-value">${r.volume && r.volume !== '***' ? `Vol ${r.volume}, p.${r.page}` : '—'}</span>
+          <span class="field-value">Vol ${r.volume || '—'}, p.${r.page || '—'}</span>
         </div>
       </div>
       <div class="result-actions">
         <button class="btn-sm primary" onclick='addRecordToTree(${JSON.stringify(r).replace(/'/g,"&#39;")}, "${type}")'>+ Add to Tree</button>
         <button class="btn-sm gold"    onclick='getContext(${JSON.stringify(r).replace(/'/g,"&#39;")}, "${type}")'>✦ Historical Context</button>
-        ${r.source_url ? `<a href="${r.source_url}" target="_blank" rel="noopener" style="text-decoration:none"><button class="btn-sm">FreeBMD ↗</button></a>` : ''}
       </div>
-      ${r.redacted ? `<div style="font-size:0.7rem;color:var(--stone);padding:0.4rem 0.8rem 0.6rem;opacity:0.7">${r.redacted_note}</div>` : ''}
     </div>`;
 }
 

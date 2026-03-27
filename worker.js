@@ -149,10 +149,10 @@ function parseCWGCcsv(csv) {
 }
 
 // ============================================================
-// SEARCH — FreeBMD2 (live scrape + D1 cache)
+// SEARCH — FreeBMD (live scrape + D1 cache)
 // England & Wales births, marriages, deaths 1837–present
-// freebmd2.org.uk — server-rendered HTML, no auth required
-// Two-step flow: POST search → get search_id → GET results page
+// freebmd.org.uk — CGI search, js=0 returns plain HTML, no auth required
+// Simple GET request — much more reliable than FreeBMD2 POST flow
 // ============================================================
 async function searchBMD(url, env) {
   const surname  = (url.searchParams.get('surname')  || '').trim().toUpperCase();
@@ -160,103 +160,61 @@ async function searchBMD(url, env) {
   const type     = (url.searchParams.get('type')     || 'all'); // birth | marriage | death | all
   const yearFrom = url.searchParams.get('year_from') || '1837';
   const yearTo   = url.searchParams.get('year_to')   || '2005';
-  const district = (url.searchParams.get('district') || '').trim();
+  const district = (url.searchParams.get('district') || url.searchParams.get('county') || '').trim();
 
   if (!surname) return json({ error: 'surname is required' }, 400);
 
-  const cacheKey = `bmd2:${surname}:${forename}:${type}:${yearFrom}:${yearTo}:${district}`.toLowerCase();
+  const cacheKey = `bmd:${surname}:${forename}:${type}:${yearFrom}:${yearTo}:${district}`.toLowerCase();
 
-  // Check D1 cache first
   const cached = await getCachedResults(env, cacheKey);
   if (cached) return json({ ...cached, cached: true });
 
-  // ── Step 1: POST the search form to get a search_id ──────
-  // FreeBMD2 accepts multipart or urlencoded POST to /search_queries
-  // Record type values: Birth, Marriage, Death (or omit for all three)
-  const typeMap = { birth: 'Birth', marriage: 'Marriage', death: 'Death' };
+  // FreeBMD CGI type parameter
+  const typeMap = { birth: 'Births', marriage: 'Marriages', death: 'Deaths', all: 'All' };
+  const cgiType = typeMap[type] || 'All';
 
-  const formData = new URLSearchParams();
-  formData.set('utf8', '✓');
-  formData.set('search_query[surname]',       surname);
-  formData.set('search_query[surname_exact]', 'false');
-  formData.set('search_query[phonetic_surname]', 'false');
-  if (forename)  formData.set('search_query[given_name]',   forename);
-  if (yearFrom)  formData.set('search_query[start_year]',   yearFrom);
-  if (yearTo)    formData.set('search_query[end_year]',     yearTo);
-  if (district)  formData.set('search_query[district]',     district);
+  // year range — CGI uses year + range (± years around centre)
+  // Simplest approach: use year=yearFrom, range = yearTo - yearFrom
+  const centreYear = yearFrom;
+  const range      = Math.max(0, parseInt(yearTo) - parseInt(yearFrom));
 
-  // Record type — omit for "all three"
-  if (type !== 'all' && typeMap[type]) {
-    formData.set('search_query[record_type][]', typeMap[type]);
-  } else {
-    formData.append('search_query[record_type][]', 'Birth');
-    formData.append('search_query[record_type][]', 'Marriage');
-    formData.append('search_query[record_type][]', 'Death');
-  }
+  const params = new URLSearchParams({
+    type:      cgiType,
+    lastname:  surname,
+    firstname: forename || '',
+    district:  district || '',
+    year:      centreYear,
+    range:     String(range),
+    qtrs:      '5',   // all quarters
+    js:        '0',   // plain HTML — no JavaScript rendering needed
+    Submitbtn: 'Search',
+  });
 
-  formData.set('button', '');
+  const searchUrl = `https://www.freebmd.org.uk/cgi/search.pl?${params}`;
 
-  let searchId;
-  let resultsUrl;
-
-  try {
-    const postResp = await fetch('https://www.freebmd2.org.uk/search_queries', {
-      method:   'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent':   'Mozilla/5.0 (compatible; personal-family-history-research)',
-        'Referer':      'https://www.freebmd2.org.uk/search_queries/new',
-        'Accept':       'text/html,*/*',
-      },
-      body:     formData.toString(),
-      redirect: 'follow', // Workers don't expose Location on manual redirects
-    });
-
-    // After following the redirect, the final URL contains the search_id
-    // e.g. https://www.freebmd2.org.uk/search_queries/69c6f08bb620e0d77cea63b6
-    const finalUrl = postResp.url || '';
-    const idFromUrl = finalUrl.match(/search_queries\/([a-f0-9]{20,})/);
-
-    if (idFromUrl) {
-      searchId = idFromUrl[1];
-    } else {
-      // Fall back to scanning the response body
-      const body = await postResp.text();
-      const idFromBody = body.match(/search_queries\/([a-f0-9]{20,})/);
-      if (!idFromBody) throw new Error('FreeBMD2 did not return a search ID');
-      searchId = idFromBody[1];
-    }
-
-    resultsUrl = `https://www.freebmd2.org.uk/search_queries/${searchId}?results_per_page=100`;
-
-  } catch (e) {
-    return json({ results: [], source: 'freebmd', count: 0, error: `FreeBMD2 search failed: ${e.message}` });
-  }
-
-  // ── Step 2: GET the results page ─────────────────────────
   let html;
   try {
-    const getResp = await fetch(resultsUrl, {
+    const resp = await fetch(searchUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; personal-family-history-research)',
-        'Accept':     'text/html,*/*',
-        'Referer':    'https://www.freebmd2.org.uk/search_queries/new',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept':     'text/html,application/xhtml+xml,*/*',
+        'Referer':    'https://www.freebmd.org.uk/search',
       }
     });
-    if (!getResp.ok) throw new Error(`FreeBMD2 results ${getResp.status}`);
-    html = await getResp.text();
+    if (!resp.ok) throw new Error(`FreeBMD ${resp.status}`);
+    html = await resp.text();
   } catch (e) {
-    return json({ results: [], source: 'freebmd', count: 0, error: `FreeBMD2 results unavailable: ${e.message}` });
+    return json({ results: [], source: 'freebmd', count: 0, error: `FreeBMD unavailable: ${e.message}` });
   }
 
-  const results = parseFreeBMD2Html(html, surname, searchId);
+  const results = parseFreeBMDHtml(html, surname, searchUrl);
 
   const payload = {
     results,
     source:     'freebmd',
     coverage:   'England & Wales, 1837–present',
     count:      results.length,
-    search_url: resultsUrl,
+    search_url: searchUrl,
     cached:     false,
   };
 
@@ -266,91 +224,101 @@ async function searchBMD(url, env) {
   return json(payload);
 }
 
-function parseFreeBMD2Html(html, surname, searchId) {
+function parseFreeBMDHtml(html, surname, searchUrl) {
   const results = [];
 
-  // FreeBMD2 results table columns:
-  // [0] First Name + Surname (combined cell with link)
-  // [1] Record Type (Birth / Marriage / Death)
-  // [2] Registration Date (e.g. "Jul to Sep 1981" or just "1985")
-  // [3] Registration District & Reference (District, Volume N, Page N)
-  // [4] Mother's Maiden Name / Spouse Surname / Age at Death
+  // FreeBMD js=0 results table columns (varies by record type):
+  // Births:    First name(s) | Surname | Mother's maiden name | District | Vol | Page | Year | Quarter
+  // Marriages: First name(s) | Surname | Spouse surname       | District | Vol | Page | Year | Quarter
+  // Deaths:    First name(s) | Surname | Age                  | District | Vol | Page | Year | Quarter
 
+  // The table has a header row with these labels — detect it then parse rows
   const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let trMatch;
-  let inResultsTable = false;
+  let inTable = false;
+  let recordType = null;
 
-  while ((trMatch = trRegex.exec(html)) !== null) {
-    const row = trMatch[1];
+  // Detect record type from section headers in the page
+  // FreeBMD wraps each type in a section headed "Births", "Marriages", "Deaths"
+  let currentSection = null;
+  const sectionRegex = /class="[^"]*section[^"]*"[^>]*>\s*(?:<[^>]+>)?\s*(Births|Marriages|Deaths)/gi;
+  let sectionMatch;
+  const sectionPositions = [];
+  while ((sectionMatch = sectionRegex.exec(html)) !== null) {
+    sectionPositions.push({ type: sectionMatch[1], pos: sectionMatch.index });
+  }
 
-    // Detect header row — FreeBMD2 uses "First Name" and "Record Type"
-    if (/First Name.*Record Type/i.test(row) || /Record Type.*Registration Date/i.test(row)) {
-      inResultsTable = true;
-      continue;
+  // Parse all <tr> rows
+  const allRows = [];
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch;
+  while ((rowMatch = rowRegex.exec(html)) !== null) {
+    allRows.push({ content: rowMatch[1], pos: rowMatch.index });
+  }
+
+  for (const row of allRows) {
+    // Determine which section this row falls under
+    let section = 'All';
+    for (const sp of sectionPositions) {
+      if (row.pos > sp.pos) section = sp.type;
     }
 
-    if (!inResultsTable) continue;
-
-    // Extract all <td> contents, stripping inner HTML
     const cells = [];
     const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
     let tdMatch;
-    while ((tdMatch = tdRegex.exec(row)) !== null) {
+    while ((tdMatch = tdRegex.exec(row.content)) !== null) {
       cells.push(
         tdMatch[1]
-          .replace(/<[^>]+>/g, ' ')       // strip tags
-          .replace(/&amp;/g,   '&')
-          .replace(/&nbsp;/g,  ' ')
-          .replace(/\s+/g,     ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&amp;/g,  '&')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/&#160;/g, ' ')
+          .replace(/\s+/g,    ' ')
           .trim()
       );
     }
 
-    if (cells.length < 3) continue;
+    // Need at least 7 cells: name, surname, extra, district, vol, page, year (+ optional quarter)
+    if (cells.length < 7) continue;
 
-    // Cell 0: "CRAIG STEPHEN HOWE" — split on final word (surname), rest is given name(s)
-    const fullName   = cells[0] || '';
-    const nameMatch  = fullName.match(/^(.+)\s+([A-Z][A-Z\-']+)$/);
-    const parsedForename = nameMatch ? nameMatch[1].trim() : fullName;
-    const parsedSurname  = nameMatch ? nameMatch[2].trim() : surname;
+    // Skip header rows
+    if (/first\s*name|surname|district|quarter/i.test(cells[0])) continue;
 
-    // Cell 1: Record type
-    const recordType = cells[1]?.trim() || '';
-    if (!recordType || !/Birth|Marriage|Death/i.test(recordType)) continue;
+    const forename     = cells[0] || '';
+    const parsedSurn   = cells[1] || surname;
+    const extra        = cells[2] || '';   // MMN / spouse / age
+    const district     = cells[3] || '';
+    const volume       = cells[4] || '';
+    const page         = cells[5] || '';
+    const year         = parseInt(cells[6]) || null;
+    const quarterRaw   = cells[7] || '';
+    const quarter      = parseFreeBMDQuarter(quarterRaw);
 
-    // Cell 2: Registration date — "Jul to Sep 1981" or "1985" or "Jan to Mar 1980"
-    const dateStr  = cells[2] || '';
-    const yearMatch = dateStr.match(/\b(\d{4})\b/);
-    const year      = yearMatch ? parseInt(yearMatch[1]) : null;
-    const quarter   = parseFreeBMD2Quarter(dateStr);
+    if (!forename && !parsedSurn) continue;
+    if (!year) continue;
 
-    // Cell 3: "Sheffield Volume 3 Page 1902" or "East Staffs Volume 30 Page 797"
-    const distRef    = cells[3] || '';
-    const distMatch  = distRef.match(/^(.*?)\s+Volume\s+(\S+)\s+Page\s+(\S+)/i);
-    const district   = distMatch ? distMatch[1].trim() : distRef;
-    const volume     = distMatch ? distMatch[2] : '';
-    const page       = distMatch ? distMatch[3] : '';
+    // Map section name to record_type string
+    const typeStr = section === 'Births'    ? 'Birth'
+                  : section === 'Marriages' ? 'Marriage'
+                  : section === 'Deaths'    ? 'Death'
+                  : 'Unknown';
 
-    // Cell 4: Mother's maiden name / spouse surname / age
-    const extra = cells[4] || '';
-
-    // Build deep-link back to this specific search results page
-    const sourceUrl = `https://www.freebmd2.org.uk/search_queries/${searchId}?results_per_page=100`;
+    if (typeStr === 'Unknown') continue;
 
     results.push({
       source:         'freebmd',
-      record_type:    recordType,
-      surname:        parsedSurname,
-      forename:       parsedForename,
+      record_type:    typeStr,
+      surname:        parsedSurn,
+      forename,
       year,
       quarter,
       district,
       volume,
       page,
-      mothers_maiden: /Birth/i.test(recordType)    ? (extra || null) : null,
-      spouse_surname: /Marriage/i.test(recordType) ? (extra || null) : null,
-      age_at_death:   /Death/i.test(recordType)    ? (extra || null) : null,
-      source_url:     sourceUrl,
+      mothers_maiden: typeStr === 'Birth'    ? (extra || null) : null,
+      spouse_surname: typeStr === 'Marriage' ? (extra || null) : null,
+      age_at_death:   typeStr === 'Death'    ? (extra || null) : null,
+      source_url:     searchUrl,
     });
 
     if (results.length >= 50) break;
@@ -359,14 +327,13 @@ function parseFreeBMD2Html(html, surname, searchId) {
   return results;
 }
 
-function parseFreeBMD2Quarter(dateStr) {
-  if (!dateStr) return null;
-  if (/Jan.*Mar/i.test(dateStr)) return 'Q1 (Jan–Mar)';
-  if (/Apr.*Jun/i.test(dateStr)) return 'Q2 (Apr–Jun)';
-  if (/Jul.*Sep/i.test(dateStr)) return 'Q3 (Jul–Sep)';
-  if (/Oct.*Dec/i.test(dateStr)) return 'Q4 (Oct–Dec)';
-  // Post-1984 records show just a year (monthly registration, no quarter)
-  return dateStr.match(/\d{4}/) ? null : dateStr;
+function parseFreeBMDQuarter(q) {
+  if (!q) return null;
+  if (q === 'Mar' || q === '1') return 'Q1 (Jan–Mar)';
+  if (q === 'Jun' || q === '2') return 'Q2 (Apr–Jun)';
+  if (q === 'Sep' || q === '3') return 'Q3 (Jul–Sep)';
+  if (q === 'Dec' || q === '4') return 'Q4 (Oct–Dec)';
+  return q;
 }
 
 // ============================================================
