@@ -1,0 +1,13 @@
+name = "rootline-worker"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+account_id = "c41a226e2d0f7ae9050b6cab5caeae76"
+
+[[kv_namespaces]]
+binding = "ROOTLINE_TREE"
+id = "f1c501358040412e86b423c08781fbab"
+
+[[d1_databases]]
+binding = "ROOTLINE_DB"
+database_name = "rootline-db"
+database_id = "60b8bca7-2ad0-4b97-98c8-df9a4b8cdfce"
